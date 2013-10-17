@@ -4,7 +4,7 @@
  * @date 2013-3-27 обнГ8:22:44
  * @description 
  */
-package com.viewat.iso8583;
+package com.cup.iso8583;
 
 
 public class HexStringUtil {

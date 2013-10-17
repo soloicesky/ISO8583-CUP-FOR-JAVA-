@@ -5,7 +5,7 @@
  * @description 
  */
 
-package com.viewat.iso8583;
+package com.cup.iso8583;
 
 public class FieldAttr {
 

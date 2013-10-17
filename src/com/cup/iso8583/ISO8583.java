@@ -4,7 +4,7 @@
  * @date 2013-10-10 обнГ14:01:44
  * @description 
  */
-package com.viewat.iso8583;
+package com.cup.iso8583;
 
 import java.util.BitSet;
 import java.util.HashMap;
