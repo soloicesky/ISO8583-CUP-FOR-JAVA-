@@ -10,6 +10,8 @@ import java.util.BitSet;
 import java.util.HashMap;
 
 public class ISO8583 {
+	public static final int LEN_TPDU = 10;
+	public static final int LEN_MSG_HEAD = 12;
 	public static final int LEN_MSG_CODE = 4;
 	public static final int LEN_BITMAP = 8;
 	public static final int LEN_PAN = 19;
@@ -48,8 +50,292 @@ public class ISO8583 {
 
 	// private ArrayList<FieldAttr> FieldAttrDicts = new ArrayList<FieldAttr>();
 	private HashMap<Integer, FieldAttr> FieldAttrDicts = new HashMap<Integer, FieldAttr>();
+	private boolean dictChanged = false;
 
 	public ISO8583() {
+		initFieldAttrDict();
+	}
+
+	public int generateISO8583Msg(byte[] des8583Msg, int[] fieldIdSet,
+			HashMap<Integer, FieldAttr> fieldAttrSets) {
+		FieldAttrDicts.putAll(fieldAttrSets);
+		dictChanged = true;
+		return generateISO8583Msg(des8583Msg, fieldIdSet);
+	}
+
+	/**
+	 * 
+	 * @param des8583Msg
+	 *            保存组好的消息报文
+	 * @param fieldIdSet
+	 *            需要组的域的集合 比如{0, 2, 11, 35, 41,42,64}
+	 * @return {@value < 0} 组包失败 , @retval > 0 消息报文长度
+	 */
+	public int generateISO8583Msg(byte[] des8583Msg, int[] fieldIdSet) {
+		// add your to do here
+		int desMsgLen = 0;
+		Element field;
+		FieldAttr attr;
+		BitSet bs = new BitSet(64);
+		int contentLen;
+
+		if (des8583Msg == null || des8583Msg.length <= 0) {
+			if (dictChanged) {
+				initFieldAttrDict();
+				dictChanged = false;
+			}
+			return -1;
+		}
+
+		for (int id : fieldIdSet) {
+			if (id == 1) {
+				bs = new BitSet(128);
+				break;
+			}
+		}
+
+		desMsgLen += bs.size() / 8;
+
+		for (int id : fieldIdSet) {
+
+			field = ISO8583Repo.getInstance().getElement(id);
+			attr = FieldAttrDicts.get(id);
+
+			if (attr.geteElementAttr() == FieldAttr.Attr_Over) {
+				break;
+			}
+
+			if (attr.geteElementAttr() != FieldAttr.Attr_UnUsed) {
+
+				if (0 >= id && id > bs.length()) {
+					if (dictChanged) {
+						initFieldAttrDict();
+						dictChanged = false;
+					}
+					return (0 - id);
+				}
+
+				// if ((field.getLength()+1)/2 > attr.getUiLength()) {
+				// return (0 - id);
+				// }
+
+				if (id > 0) { // 0域定义为消息类型码，而消息类型码不在bitmap里面
+					bs.set(id - 1);
+				}
+
+				if (attr.geteElementAttr() == FieldAttr.Attr_b) {
+					contentLen = (field.getLength() + 1) / 2;
+				} else {
+					contentLen = field.getLength();
+				}
+
+				if (contentLen > attr.getUiLength()) {
+					if (dictChanged) {
+						initFieldAttrDict();
+						dictChanged = false;
+					}
+					return (0 - id);
+				}
+
+				switch (attr.geteLengthAttr()) {
+				case FieldAttr.Attr_fix:
+					if (field.getLength() != attr.getUiLength()) {
+						if (dictChanged) {
+							initFieldAttrDict();
+							dictChanged = false;
+						}
+						return (0 - id);
+					}
+
+					break;
+				case FieldAttr.Attr_var1:
+					des8583Msg[desMsgLen++] = (byte) (((contentLen / 10) << 4) | (contentLen % 10));
+
+					break;
+				case FieldAttr.Attr_var2:
+					des8583Msg[desMsgLen++] = (byte) (contentLen / 100);
+					des8583Msg[desMsgLen++] = (byte) ((((contentLen / 100) / 10) << 4) | ((contentLen / 100) % 10));
+
+					break;
+				default:
+					break;
+				}
+
+				switch (attr.geteElementAttr()) {
+				case FieldAttr.Attr_a:
+					System.arraycopy(des8583Msg, desMsgLen, field.getValue()
+							.getBytes(), 0, contentLen);
+					desMsgLen += contentLen;
+					break;
+				case FieldAttr.Attr_z:
+
+					// break;
+				case FieldAttr.Attr_n:
+
+					// break;
+				case FieldAttr.Attr_b:
+					System.arraycopy(
+							HexStringUtil.hexStringToBytes(field.getValue()),
+							0, des8583Msg, desMsgLen, ((contentLen + 1) / 2));
+					desMsgLen += ((contentLen + 1) / 2);
+					break;
+				default:
+					break;
+				}
+			}
+		}
+
+		System.arraycopy(BSToByteArray(bs), 0, des8583Msg, 0, bs.size() / 8);
+		
+		if (dictChanged) {
+			initFieldAttrDict();
+			dictChanged = false;
+		}
+		return desMsgLen;
+	}
+
+	/**
+	 * 
+	 * @param resp8583Msg
+	 *            从bitmap开始到MAC
+	 * @param bitMapSize
+	 *            bitmap占用的字节数
+	 * @return @retval < 0 解包失败； @retval == 0 解包成功
+	 */
+	public int parseISO8583Msg(byte[] resp8583Msg, int bitMapSize) {
+		// add your to do here
+		if (resp8583Msg == null || resp8583Msg.length <= 0) {
+			return -1;
+		}
+
+		byte[] bm = new byte[bitMapSize];
+		System.arraycopy(resp8583Msg, LEN_TPDU / 2 + LEN_MSG_HEAD / 2
+				+ LEN_MSG_CODE / 2, bm, 0, bitMapSize);
+		BitSet bitmap = ByteArrayToBS(bm);
+		int fieldId = 0;
+		FieldAttr fdAttr;
+		int cursor = 0;
+		int contentLen = 0;
+
+		for (int i = -3; i < bitmap.size(); i++) { // 从tpdu开始解析
+			if (i == 0) {
+				cursor += bitMapSize;
+			}
+
+			if (i < 0 || bitmap.get(i)) {
+
+				fieldId = i + 1;
+				fdAttr = FieldAttrDicts.get(fieldId);
+
+				if (fdAttr == null) {
+					if (dictChanged) {
+						initFieldAttrDict();
+						dictChanged = false;
+					}
+					return -2;
+				}
+
+				Element e = new Element();
+				e.setFieldId(fieldId);
+
+				switch (fdAttr.geteLengthAttr()) {
+				case FieldAttr.Attr_fix:
+					contentLen = fdAttr.getUiLength();
+
+					break;
+				case FieldAttr.Attr_var1:
+					contentLen = ((resp8583Msg[cursor] & 0xF0) >> 4) * 10
+							+ (resp8583Msg[cursor] & 0x0F);
+					cursor++;
+
+					if (contentLen > fdAttr.getUiLength()) {
+						if (dictChanged) {
+							initFieldAttrDict();
+							dictChanged = false;
+						}
+						return (-1000 - fieldId);
+					}
+
+					break;
+				case FieldAttr.Attr_var2:
+					contentLen = (resp8583Msg[cursor] & 0x0F) * 100
+							+ ((resp8583Msg[cursor + 1] & 0xF0) >> 4) * 10
+							+ (resp8583Msg[cursor + 1] & 0x0F);
+					cursor += 2;
+
+					if (contentLen > fdAttr.getUiLength()) {
+						if (dictChanged) {
+							initFieldAttrDict();
+							dictChanged = false;
+						}
+						return (-1000 - fieldId);
+					}
+
+					break;
+
+				default:
+					break;
+				}
+
+				switch (fdAttr.geteElementAttr()) {
+				case FieldAttr.Attr_a:
+
+					e.setValue(new String(resp8583Msg, cursor, contentLen));
+					e.setLength(contentLen);
+					cursor += contentLen;
+					break;
+				case FieldAttr.Attr_n:
+
+					// break;
+				case FieldAttr.Attr_z:
+
+					e.setValue(HexStringUtil.byteArrayToHexstring(resp8583Msg,
+							cursor, cursor + ((contentLen + 1) / 2)));
+					e.setLength(contentLen);
+
+					cursor += ((contentLen + 1) / 2);
+
+					break;
+				case FieldAttr.Attr_b:
+
+					e.setValue(HexStringUtil.byteArrayToHexstring(resp8583Msg,
+							cursor, cursor + contentLen));
+					e.setLength(contentLen);
+
+					cursor += contentLen;
+
+					break;
+				default:
+					break;
+				}
+
+				System.out.println("" + e.getFieldId() + " : " + e.getLength()
+						+ " : " + e.getValue());
+				ISO8583Repo.getInstance().put(e);
+			}
+		}
+
+		if (dictChanged) {
+			initFieldAttrDict();
+			dictChanged = false;
+		}
+		return 0;
+	}
+
+	public int parseISO8583Msg(byte[] resp8583Msg, int bitMapSize,
+			HashMap<Integer, FieldAttr> fieldAttrSets) {
+		FieldAttrDicts.putAll(fieldAttrSets);
+		dictChanged = true;
+		return parseISO8583Msg(resp8583Msg, bitMapSize);
+	}
+
+	private void initFieldAttrDict() {
+		FieldAttrDicts.put(-2, new FieldAttr(FieldAttr.Attr_n,
+				FieldAttr.Attr_fix, LEN_TPDU)); /* -2 -- TPDU */
+		FieldAttrDicts.put(-1, new FieldAttr(FieldAttr.Attr_n,
+				FieldAttr.Attr_fix, LEN_MSG_HEAD)); /* -1 -- message header */
+		FieldAttrDicts.put(0, new FieldAttr(FieldAttr.Attr_n,
+				FieldAttr.Attr_fix, LEN_MSG_CODE)); /* 0 -- message code */
 		FieldAttrDicts.put(1, new FieldAttr(FieldAttr.Attr_b,
 				FieldAttr.Attr_fix, LEN_BITMAP)); /* 1 -- Bit Map, Extended */
 		FieldAttrDicts.put(2, new FieldAttr(FieldAttr.Attr_n,
@@ -248,227 +534,6 @@ public class ISO8583 {
 													 * 64 -- Message
 													 * Authentication Code Field
 													 */
-
-	}
-
-	public int generateISO8583Msg(byte[] des8583Msg, int[] fieldIdSet,
-			HashMap<Integer, FieldAttr> fieldAttrSets) {
-		FieldAttrDicts.putAll(fieldAttrSets);
-		return generateISO8583Msg(des8583Msg, fieldIdSet);
-	}
-
-	/**
-	 * 
-	 * @param des8583Msg 保存组好的消息报文
-	 * @param fieldIdSet 需要组的域的集合 比如{2, 11, 35, 41,42,64}
-	 * @return {@value < 0} 组包失败 , @retval > 0 消息报文长度
-	 */
-	public int generateISO8583Msg(byte[] des8583Msg, int[] fieldIdSet) {
-		// add your to do here
-		int desMsgLen = 0;
-		Element field;
-		FieldAttr attr;
-		BitSet bs = new BitSet(64);
-		int contentLen;
-
-		if (des8583Msg == null || des8583Msg.length <= 0) {
-			return -1;
-		}
-
-		for (int id : fieldIdSet) {
-			if (id == 1) {
-				bs = new BitSet(128);
-				break;
-			}
-		}
-
-		desMsgLen += bs.size() / 8;
-
-		for (int id : fieldIdSet) {
-
-			field = ISO8583Repo.getInstance().getElement(id);
-			attr = FieldAttrDicts.get(id);
-
-			if (attr.geteElementAttr() == FieldAttr.Attr_Over) {
-				break;
-			}
-
-			if (attr.geteElementAttr() != FieldAttr.Attr_UnUsed) {
-
-				if (0 >= id && id > 64) {
-					return (0 - id);
-				}
-
-				if (field.getLength() > attr.getUiLength()) {
-					return (0 - id);
-				}
-
-				bs.set(id - 1);
-
-				if (attr.geteElementAttr() == FieldAttr.Attr_b) {
-					contentLen = field.getLength() / 2;
-				} else {
-					contentLen = field.getLength();
-				}
-
-				switch (attr.geteLengthAttr()) {
-				case FieldAttr.Attr_fix:
-					if (field.getLength() != attr.getUiLength()) {
-						return (0 - id);
-					}
-
-					break;
-				case FieldAttr.Attr_var1:
-					des8583Msg[desMsgLen++] = (byte) (((contentLen / 10) << 4) | (contentLen % 10));
-
-					break;
-				case FieldAttr.Attr_var2:
-					des8583Msg[desMsgLen++] = (byte) (contentLen / 100);
-					des8583Msg[desMsgLen++] = (byte) ((((contentLen / 100) / 10) << 4) | ((contentLen / 100) % 10));
-
-					break;
-				default:
-					break;
-				}
-
-				switch (attr.geteElementAttr()) {
-				case FieldAttr.Attr_a:
-					System.arraycopy(des8583Msg, desMsgLen, field.getValue()
-							.getBytes(), 0, contentLen);
-					desMsgLen += contentLen;
-					break;
-				case FieldAttr.Attr_z:
-
-					// break;
-				case FieldAttr.Attr_n:
-
-					// break;
-				case FieldAttr.Attr_b:
-					System.arraycopy(
-							HexStringUtil.hexStringToBytes(field.getValue()),
-							0, des8583Msg, desMsgLen, ((contentLen + 1) / 2));
-					desMsgLen += ((contentLen + 1) / 2);
-					break;
-				default:
-					break;
-				}
-			}
-		}
-
-		System.arraycopy(BSToByteArray(bs), 0, des8583Msg, 0, bs.size() / 8);
-		return desMsgLen;
-	}
-
-	/**
-	 * 
-	 * @param resp8583Msg
-	 *            从bitmap开始到MAC
-	 * @param bitMapSize
-	 *            bitmap占用的字节数
-	 * @return @retval < 0 解包失败； @retval == 0 解包成功
-	 */
-	public int parseISO8583Msg(byte[] resp8583Msg, int bitMapSize) {
-		// add your to do here
-		if (resp8583Msg == null || resp8583Msg.length <= 0) {
-			return -1;
-		}
-
-		byte[] bm = new byte[bitMapSize];
-		System.arraycopy(resp8583Msg, 0, bm, 0, bitMapSize);
-		BitSet bitmap = ByteArrayToBS(bm);
-		int fieldId = 0;
-		FieldAttr fdAttr;
-		int cursor = bitMapSize;
-		int contentLen = 0;
-
-		for (int i = 0; i < bitmap.size(); i++) {
-			if (bitmap.get(i)) {
-				fieldId = i + 1;
-				fdAttr = FieldAttrDicts.get(fieldId);
-
-				if (fdAttr == null) {
-					return -2;
-				}
-
-				Element e = new Element();
-				e.setFieldId(fieldId);
-
-				switch (fdAttr.geteLengthAttr()) {
-				case FieldAttr.Attr_fix:
-					contentLen = fdAttr.getUiLength();
-
-					break;
-				case FieldAttr.Attr_var1:
-					contentLen = ((resp8583Msg[cursor] & 0xF0) >> 4) * 10
-							+ (resp8583Msg[cursor] & 0x0F);
-					cursor++;
-
-					if (contentLen > fdAttr.getUiLength()) {
-						return (-1000 - fieldId);
-					}
-
-					break;
-				case FieldAttr.Attr_var2:
-					contentLen = (resp8583Msg[cursor] & 0x0F) * 100
-							+ ((resp8583Msg[cursor + 1] & 0xF0) >> 4) * 10
-							+ (resp8583Msg[cursor + 1] & 0x0F);
-					cursor += 2;
-
-					if (contentLen > fdAttr.getUiLength()) {
-						return (-1000 - fieldId);
-					}
-
-					break;
-
-				default:
-					break;
-				}
-
-				switch (fdAttr.geteElementAttr()) {
-				case FieldAttr.Attr_a:
-
-					e.setValue(new String(resp8583Msg, cursor, contentLen));
-					e.setLength(contentLen);
-					cursor += contentLen;
-					break;
-				case FieldAttr.Attr_n:
-
-					// break;
-				case FieldAttr.Attr_z:
-
-					e.setValue(HexStringUtil.byteArrayToHexstring(resp8583Msg,
-							cursor, cursor + ((contentLen + 1) / 2)));
-					e.setLength(contentLen);
-
-					cursor += ((contentLen + 1) / 2);
-
-					break;
-				case FieldAttr.Attr_b:
-
-					e.setValue(HexStringUtil.byteArrayToHexstring(resp8583Msg,
-							cursor, cursor + contentLen));
-					e.setLength(contentLen);
-
-					cursor += contentLen;
-
-					break;
-				default:
-					break;
-				}
-
-				System.out.println("" + e.getFieldId() + " : " + e.getLength()
-						+ " : " + e.getValue());
-				ISO8583Repo.getInstance().put(e);
-			}
-		}
-
-		return 0;
-	}
-
-	public int parseISO8583Msg(byte[] resp8583Msg, int bitMapSize,
-			HashMap<Integer, FieldAttr> fieldAttrSets) {
-		FieldAttrDicts.putAll(fieldAttrSets);
-		return parseISO8583Msg(resp8583Msg, bitMapSize);
 	}
 
 	public byte[] BSToByteArray(BitSet bs) {
